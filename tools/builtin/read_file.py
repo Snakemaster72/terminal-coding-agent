@@ -93,7 +93,7 @@ class ReadFileTool(Tool):
                 formatted_lines.append(f"{i:6}|{line}")
 
             output = "\n".join(formatted_lines)
-            token_count = count_tokens(output, "nvidia/nemotron-3.5-lightning:free")
+            token_count = count_tokens(output)
 
             truncated = False
             if token_count > self.MAX_OUTPUT_TOKENS:

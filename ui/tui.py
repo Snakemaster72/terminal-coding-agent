@@ -11,6 +11,7 @@ from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
+from config.config import Config
 from utils.paths import resolve_path_rel_to_cwd
 from utils.text import truncate_text
 
@@ -53,11 +54,14 @@ def get_console() -> Console:
 
 
 class TUI:
-    def __init__(self, console: Console | None = None) -> None:
+    def __init__(
+        self, console: Console | None = None, config: Config | None = None
+    ) -> None:
         self.console = console or get_console()
         self._assistant_stream_open = False
         self._tool_args_by_call_id: dict[str, dict[str, Any]] = {}
-        self.cwd = Path.cwd()
+        self.config = config
+        self.cwd = self.config.cwd
 
     def begin_assistant(self) -> None:
         self.console.print()
@@ -196,6 +200,19 @@ class TUI:
             ".xml": "xml",
             ".sql": "sql",
         }.get(suffix, "text")
+
+    def print_welcome(self, title: str, lines: list[str]) -> None:
+        body = "\n".join(lines)
+        self.console.print(
+            Panel(
+                Text(body, style="code"),
+                title=Text(title, style="highlight"),
+                title_align="left",
+                border_style="border",
+                box=box.ROUNDED,
+                padding=(1, 2),
+            )
+        )
 
     def tool_call_complete(
         self,

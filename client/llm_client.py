@@ -13,21 +13,25 @@ from client.response import (
     ToolCallDelta,
     parse_tool_call_arguments,
 )
+from config.config import Config
 
 
 class LLMClient:
-    def __init__(self) -> None:
+    def __init__(self, config: Config) -> None:
         # _client is a private member
         self._client: AsyncOpenAI | None = None
         self._max_retries: int = 3
+        self.config = config
 
     def get_client(self) -> AsyncOpenAI:
         if self._client is None:
             # not selecting model, that depends on when we send a message, user can change model anytime,
             # cursor has an auto model feature
             self._client = AsyncOpenAI(
-                api_key="***REMOVED***",
-                base_url="https://openrouter.ai/api/v1",
+                api_key=self.config.api_key,
+                # ***REMOVED***
+                base_url=self.config.base_url,
+                # "https://openrouter.ai/api/v1",
             )
         return self._client
 
@@ -64,7 +68,7 @@ class LLMClient:
 
         # kwargs = keyword arguments?
         kwargs = {
-            "model": "nvidia/nemotron-3.5-lightning:free",
+            "model": self.config.model_name,
             "messages": messages,
             "stream": stream,
         }

@@ -1,7 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-from context.system import get_system_prompt
+from config.config import Config
+from prompts.system import get_system_prompt
 from utils.text import count_tokens
 
 
@@ -29,9 +30,10 @@ class MessageItem:
 
 
 class ContextManager:
-    def __init__(self) -> None:
-        self._system_prompt = get_system_prompt()
-        self._model_name = "nvidia/nemotron-3.5-lightning:free"
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self._system_prompt = get_system_prompt(config=config)
+        self._model_name = self.config.model_name
         self._messages: list[MessageItem] = []
 
     def add_user_message(self, content: str) -> None:
@@ -43,11 +45,14 @@ class ContextManager:
 
         self._messages.append(item)
 
-    def add_assistant_message(self, content: str) -> None:
+    def add_assistant_message(
+        self, content: str, tool_calls: list[dict[str, Any]] | None = None
+    ) -> None:
         item = MessageItem(
             role="assistant",
             content=content or "",
             token_count=count_tokens(content or "", self._model_name),
+            tool_calls=tool_calls or [],
         )
 
         self._messages.append(item)
