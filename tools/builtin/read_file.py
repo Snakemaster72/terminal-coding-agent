@@ -89,8 +89,8 @@ class ReadFileTool(Tool):
             selected_lines = lines[start_idx:end_idx]
             formatted_lines = []
 
-            for i, line in enumerate(selected_lines, start=start_idx):
-                formatted_lines.append(f"{i:6} | {line}")
+            for i, line in enumerate(selected_lines, start=start_idx + 1):
+                formatted_lines.append(f"{i:6}|{line}")
 
             output = "\n".join(formatted_lines)
             token_count = count_tokens(output, "nvidia/nemotron-3.5-lightning:free")
@@ -106,8 +106,8 @@ class ReadFileTool(Tool):
 
             metadata_lines = []
             if start_idx > 0 or end_idx < total_lines:
-                metadata_lines(
-                    f"Showing lines {start_idx + 1} - {end_idx} of {total_lines}"
+                metadata_lines.append(
+                    f"Showing lines {start_idx + 1}-{end_idx} of {total_lines}"
                 )
 
             if metadata_lines:

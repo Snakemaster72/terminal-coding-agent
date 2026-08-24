@@ -17,7 +17,7 @@ def resolve_path_rel_to_cwd(path: str, cwd: Path) -> str:
 
     if cwd:
         try:
-            return p.relative_to(cwd)
+            return str(p.relative_to(cwd))
         except ValueError:
             pass
     return str(p)

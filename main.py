@@ -23,6 +23,16 @@ class CLI:
             self.agent = agent
             return await self._process_message(message)
 
+    def _get_tool_kind(self, tool_name: str) -> str | None:
+        tool_kind = None
+        tool = self.agent.tool_registry.get(tool_name)
+        if not tool:
+            tool_kind = None
+        else:
+            tool_kind = tool.kind.value
+
+        return tool_kind
+
     async def _process_message(self, message: str) -> str | None:
         if not self.agent:
             return None
@@ -53,17 +63,26 @@ class CLI:
 
             elif event.type == AgentEventType.TOOL_CALL_START:
                 tool_name = event.data.get("name", "Unknown tool")
-                tool_kind = None
-                tool = self.agent.tool_registry.get(tool_name)
-                if not tool:
-                    tool_kind = None
-
-                tool_kind = tool.kind.value
+                tool_kind = self._get_tool_kind(tool_name)
                 self.tui.tool_call_start(
                     call_id=event.data.get("call_id", ""),
                     name=tool_name,
                     arguments=event.data.get("arguments", {}),
                     tool_kind=tool_kind,
+                )
+
+            elif event.type == AgentEventType.TOOL_CALL_COMPLETE:
+                tool_name = event.data.get("name", "Unknown tool")
+                tool_kind = self._get_tool_kind(tool_name)
+                self.tui.tool_call_complete(
+                    call_id=event.data.get("call_id", ""),
+                    tool_kind=tool_kind,
+                    name=event.data.get("name", "Unknown tool"),
+                    success=event.data.get("success", False),
+                    truncated=event.data.get("truncated", False),
+                    metadata=event.data.get("metadata", {}),
+                    error=event.data.get("error"),
+                    output=event.data.get("output", ""),
                 )
 
         return final_response
