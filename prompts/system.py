@@ -1,8 +1,17 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from config.config import Config
 
+if TYPE_CHECKING:
+    from tools.base import Tool
 
-def get_system_prompt(config: Config) -> str:
+
+def get_system_prompt(config: Config, tools: list[Tool] | None = None) -> str:
     parts = []
+
+    tools = tools or []
 
     # Identity and role
     parts.append(_get_identity_section())
@@ -14,6 +23,10 @@ def get_system_prompt(config: Config) -> str:
     # Security guidelines
     parts.append(_get_security_section())
 
+    # The exact set of tools wired into the registry. Anything not listed here
+    # does not exist, so the model must not invent one.
+    parts.append(_get_available_tools_section(tools))
+
     if config.developer_instructions:
         parts.append(_get_developer_instructions_section(config.developer_instructions))
 
@@ -22,8 +35,31 @@ def get_system_prompt(config: Config) -> str:
 
     # Operational guidelines
     # kind of a summary, should be last section, so that the agent can read it and follow it
-    parts.append(_get_operational_section())
+    parts.append(_get_operational_section({tool.name for tool in tools}))
     return "\n\n".join(parts)
+
+
+def _get_available_tools_section(tools: list[Tool]) -> str:
+    """List the tools actually registered, so the model can't hallucinate others."""
+    if not tools:
+        return """# Available Tools
+
+You have NO tools available in this session. Answer from the context you are
+given and tell the user plainly when a request needs an action you cannot take."""
+
+    lines = [f"- `{tool.name}`: {tool.description}" for tool in tools]
+    names = ", ".join(f"`{tool.name}`" for tool in tools)
+
+    return f"""# Available Tools
+
+These are the ONLY tools that exist in this session:
+
+{chr(10).join(lines)}
+
+Rules:
+- Call a tool only if its name appears in that list. There is no `shell`, `bash`, `glob`, `grep`, `ls`, `find`, `apply_patch`, `todos`, `memory`, or sub-agent tool unless explicitly listed above.
+- Calling a tool that is not listed wastes a turn and returns "Unknown tool". If you catch yourself reaching for one, stop and solve the task with {names} instead.
+- If the task genuinely cannot be done with the listed tools, say so in one sentence and ask the user for what you need (for example, the path to a file you cannot search for)."""
 
 
 def _get_identity_section() -> str:
@@ -74,9 +110,117 @@ def _get_security_section() -> str:
 6. **Security First**: Always apply security best practices. Never introduce code that exposes, logs, or commits secrets, API keys, or other sensitive information."""
 
 
-def _get_operational_section() -> str:
-    """Generate operational guidelines."""
-    return """# Operational Guidelines
+def _get_operational_section(available: set[str]) -> str:
+    """Generate operational guidelines, naming only tools that are registered."""
+    has_shell = bool(available & {"shell", "bash", "run_command"})
+    has_search = bool(available & {"grep", "glob", "search", "find_files"})
+    has_todos = "todos" in available
+    has_memory = "memory" in available
+    has_subagents = bool(available & {"task", "agent", "subagent"})
+
+    return _operational_template(
+        has_shell=has_shell,
+        has_search=has_search,
+        has_todos=has_todos,
+        has_memory=has_memory,
+        has_subagents=has_subagents,
+    )
+
+
+def _operational_template(
+    *,
+    has_shell: bool,
+    has_search: bool,
+    has_todos: bool,
+    has_memory: bool,
+    has_subagents: bool,
+) -> str:
+    understand = (
+        "**Understand:** Think about the user's request and the relevant codebase context. "
+        "Use search tools extensively (in parallel if independent) to understand file structures, "
+        "existing code patterns, and conventions. Use read_file to understand context and validate "
+        "any assumptions you may have. If you need to read multiple files, make multiple parallel "
+        "calls to read_file."
+        if has_search
+        else "**Understand:** Think about the user's request and the relevant codebase context. "
+        "Use read_file to inspect files and validate any assumptions you may have; if you need to "
+        "read multiple files, make multiple parallel calls to read_file. You have no search or "
+        "directory-listing tool, so work from the paths the user gave you and from paths you have "
+        "already seen. If you need a path you do not have, ask the user for it rather than guessing "
+        "or trying to search."
+    )
+
+    plan = (
+        "**Plan:** Build a coherent and grounded (based on the understanding in step 1) plan for how "
+        "you intend to resolve the user's task. For complex tasks, break them down into smaller, "
+        "manageable subtasks and use the `todos` tool to track your progress. Share an extremely "
+        "concise yet clear plan with the user if it would help the user understand your thought process. "
+        "As part of the plan, you should use an iterative development process that includes writing "
+        "unit tests to verify your changes."
+        if has_todos
+        else "**Plan:** Build a coherent and grounded (based on the understanding in step 1) plan for how "
+        "you intend to resolve the user's task. Share an extremely concise yet clear plan with the user "
+        "if it would help them understand your thought process."
+    )
+
+    verify = (
+        """4. **Verify (Tests):** If applicable and feasible, verify the changes using the project's testing procedures. Identify the correct test commands and frameworks by examining 'README' files, build/package configuration (e.g., 'package.json'), or existing test execution patterns. NEVER assume standard test commands.
+
+5. **Verify (Standards):** VERY IMPORTANT: After making code changes, execute the project-specific build, linting and type-checking commands (e.g., 'tsc', 'npm run lint', 'ruff check .' etc.) that you have identified for this project. This ensures code quality and adherence to standards.
+
+6. **Finalize:** After all verification passes, consider the task complete. Do not remove or revert any changes or created files (like tests). Await the user's next instruction."""
+        if has_shell
+        else """4. **Verify:** You cannot run commands, so you cannot run tests, builds, or linters. Verify by re-reading what you changed only when you have a concrete reason to doubt the edit succeeded. Do not claim that tests or builds pass. If the change should be verified by running something, name the command for the user and let them run it.
+
+5. **Finalize:** Consider the task complete once the edits are made. Do not remove or revert any changes or created files. Await the user's next instruction."""
+    )
+
+    tool_bullets = [
+        "- **Parallelism:** Execute multiple independent tool calls in parallel when feasible (i.e. reading multiple files). Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially."
+    ]
+
+    if has_shell:
+        tool_bullets.append(
+            "- **Command Execution:** Use the `shell` tool for running shell commands. Before executing commands that modify the file system, codebase, or system state, provide a brief explanation of the command's purpose and potential impact."
+            + (
+                " When searching for text or files, prefer using `rg` or `rg --files` respectively because `rg` is much faster than alternatives like `grep`. (If the `rg` command is not found, then use alternatives.)"
+                if not has_search
+                else ""
+            )
+        )
+        tool_bullets.append(
+            "- **File Operations:** Use the dedicated file tools instead of shell commands: `read_file` instead of cat/head/tail, `edit_file` instead of sed/awk, and `write_file` instead of cat with heredoc or echo redirection. Reserve the shell exclusively for actual system commands. NEVER use shell echo or other command-line tools to communicate thoughts, explanations, or instructions to the user. Output all communication directly in your response text instead."
+        )
+    else:
+        tool_bullets.append(
+            "- **File Operations:** `read_file`, `edit_file`, and `write_file` are how you touch the filesystem. You have no shell, so you cannot run cat, ls, find, grep, sed, git, or any other command. Do not attempt to."
+        )
+
+    tool_bullets.append(
+        "- **Editing vs. Writing:** `edit_file` is the default tool for changing a file that already exists, including when the change deletes most of the file. Call it once per region you are changing; several `edit_file` calls on one file are normal and preferred. Only use `write_file` on an existing file when you are replacing essentially all of its content in a single pass and the surviving text is too small or too scattered to anchor an edit on. Never use `write_file` to make a targeted change, and never use it on a file you have not read."
+    )
+    tool_bullets.append(
+        "- **File Creation:** Do not create new files unless necessary for achieving your goal or explicitly requested. Prefer editing an existing file when possible. This includes markdown files."
+    )
+
+    if has_memory:
+        tool_bullets.append(
+            "- **Remembering Facts:** Use the `memory` tool to remember specific, *user-related* facts or preferences when the user explicitly asks, or when they state a clear, concise piece of information that would help personalize or streamline *your future interactions with them* (e.g., preferred coding style, common project paths they use, personal tool aliases). This tool is for user-specific information that should persist across sessions. Do *not* use it for general project context or information."
+        )
+
+    if has_todos:
+        tool_bullets.append(
+            "- **Task Management:** Use the `todos` tool to track multi-step tasks. Mark tasks as completed as soon as you finish each task. Do not batch up multiple tasks before marking them as completed. Use the todos tool VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress."
+        )
+
+    if has_subagents:
+        tool_bullets.append(
+            "- **Sub-Agents:** Use sub-agents for complex codebase exploration, code review, or specialized multi-step tasks. Sub-agents run with isolated context and have limited tool access, making them ideal for focused investigations. For simple queries, use direct tools instead. Provide clear, specific goals when invoking sub-agents and integrate their results into your main workflow."
+        )
+
+    tool_usage = "\n".join(tool_bullets)
+
+    return f"""# Operational Guidelines
 
 ## Tone and Style (CLI Interaction)
 
@@ -94,17 +238,13 @@ def _get_operational_section() -> str:
 
 When requested to perform tasks like fixing bugs, adding features, refactoring, or explaining code, follow this sequence:
 
-1. **Understand:** Think about the user's request and the relevant codebase context. Use search tools extensively (in parallel if independent) to understand file structures, existing code patterns, and conventions. Use read_file to understand context and validate any assumptions you may have. If you need to read multiple files, make multiple parallel calls to read_file.
+1. {understand}
 
-2. **Plan:** Build a coherent and grounded (based on the understanding in step 1) plan for how you intend to resolve the user's task. For complex tasks, break them down into smaller, manageable subtasks and use the `todos` tool to track your progress. Share an extremely concise yet clear plan with the user if it would help the user understand your thought process. As part of the plan, you should use an iterative development process that includes writing unit tests to verify your changes.
+2. {plan}
 
 3. **Implement:** Use the available tools to act on the plan, strictly adhering to the project's established conventions.
 
-4. **Verify (Tests):** If applicable and feasible, verify the changes using the project's testing procedures. Identify the correct test commands and frameworks by examining 'README' files, build/package configuration (e.g., 'package.json'), or existing test execution patterns. NEVER assume standard test commands.
-
-5. **Verify (Standards):** VERY IMPORTANT: After making code changes, execute the project-specific build, linting and type-checking commands (e.g., 'tsc', 'npm run lint', 'ruff check .' etc.) that you have identified for this project. This ensures code quality and adherence to standards.
-
-6. **Finalize:** After all verification passes, consider the task complete. Do not remove or revert any changes or created files (like tests). Await the user's next instruction.
+{verify}
 
 ## Task Execution
 
@@ -112,13 +252,7 @@ You are a coding agent. Please keep going until the query is completely resolved
 
 ## Tool Usage
 
-- **Parallelism:** Execute multiple independent tool calls in parallel when feasible (i.e. searching the codebase, reading multiple files). Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially.
-- **Command Execution:** Use the `shell` tool for running shell commands. Before executing commands that modify the file system, codebase, or system state, provide a brief explanation of the command's purpose and potential impact. When searching for text or files, prefer using `rg` or `rg --files` respectively because `rg` is much faster than alternatives like `grep`. (If the `rg` command is not found, then use alternatives.)
-- **File Operations:** Use specialized tools instead of bash commands when possible, as this provides a better user experience. For file operations, use dedicated tools: `read_file` for reading files instead of cat/head/tail, `edit` for single-file editing instead of sed/awk, `apply_patch` for multi-file edits (2+ files), and `write_file` for creating files instead of cat with heredoc or echo redirection. Reserve bash tools exclusively for actual system commands and terminal operations that require shell execution. NEVER use bash echo or other command-line tools to communicate thoughts, explanations, or instructions to the user. Output all communication directly in your response text instead.
-- **File Creation:** Do not create new files unless necessary for achieving your goal or explicitly requested. Prefer editing an existing file when possible. This includes markdown files.
-- **Remembering Facts:** Use the `memory` tool to remember specific, *user-related* facts or preferences when the user explicitly asks, or when they state a clear, concise piece of information that would help personalize or streamline *your future interactions with them* (e.g., preferred coding style, common project paths they use, personal tool aliases). This tool is for user-specific information that should persist across sessions. Do *not* use it for general project context or information.
-- **Task Management:** Use the `todos` tool to track multi-step tasks. Mark tasks as completed as soon as you finish each task. Do not batch up multiple tasks before marking them as completed. Use the todos tool VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress. These tools are also EXTREMELY helpful for planning tasks, and for breaking down larger complex tasks into smaller steps.
-- **Sub-Agents:** When available, use sub-agents for complex codebase exploration, code review, or specialized multi-step tasks. Sub-agents run with isolated context and have limited tool access, making them ideal for focused investigations. For simple queries (like finding a specific function), use direct tools (`grep`, `read_file`) instead. Use sub-agents when the task involves complex refactoring, codebase exploration, or system-wide analysis. Provide clear, specific goals when invoking sub-agents and integrate their results into your main workflow.
+{tool_usage}
 
 ## Error Recovery
 
@@ -127,6 +261,8 @@ When something goes wrong:
 2. Diagnose the root cause
 3. Fix the underlying issue, not just the symptom
 4. Verify the fix works
+
+If a tool call returns "Unknown tool", that tool does not exist in this session. Do NOT retry it and do NOT try a different guess at its name. Re-read the Available Tools section and accomplish the task with what is listed, or tell the user what you need.
 
 ## Code References
 
@@ -148,7 +284,7 @@ If completing the user's task requires writing or modifying files, your code and
 - Update documentation as necessary.
 - Keep changes consistent with the style of the existing codebase. Changes should be minimal and focused on the task.
 - NEVER add copyright or license headers unless specifically requested.
-- Do not waste tokens by re-reading files after calling `apply_patch` on them. The tool call will fail if it didn't work. The same goes for making folders, deleting folders, etc.
+- Do not waste tokens by re-reading files after calling `edit_file` or `write_file` on them. The tool call will fail if it didn't work. The same goes for making folders, deleting folders, etc.
 - Do not add inline comments within code unless explicitly requested.
 - Do not use one-letter variable names unless explicitly requested."""
 

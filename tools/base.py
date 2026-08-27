@@ -9,6 +9,8 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 from pydantic.json_schema import model_json_schema
 
+from config.config import Config
+
 
 class ToolKind(str, Enum):
     READ = "read"
@@ -26,6 +28,41 @@ class ToolInvocation:
 
 
 @dataclass
+class FileDiff:
+    path: Path
+    old_content: str
+    new_content: str
+    is_new_file: bool = False
+    is_deletion: bool = False
+
+    def create_diff(self) -> str:
+        import difflib
+
+        # keepends=True to preserve line endings
+        old_lines = self.old_content.splitlines(keepends=True)
+        new_lines = self.new_content.splitlines(keepends=True)
+
+        if old_lines and not old_lines[-1].endswith("\n"):
+            old_lines[-1] += "\n"
+        if new_lines and not new_lines[-1].endswith("\n"):
+            new_lines[-1] += "\n"
+
+        old_name = "/dev/null" if self.is_new_file else str(self.path)
+        new_name = str(self.path) if not self.is_deletion else "/dev/null"
+        # lines already carry their newlines (keepends=True), so the headers
+        # must terminate with "\n" too, otherwise "".join glues them together
+        diff = difflib.unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=old_name,
+            tofile=new_name,
+            lineterm="\n",
+        )
+
+        return "".join(diff)
+
+
+@dataclass
 class ToolResult:
     success: bool
     output: str
@@ -33,6 +70,8 @@ class ToolResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     truncated: bool = False
+    diff: FileDiff | None = None
+    exit_code: int | None = None
 
     @classmethod
     def error_result(cls, error: str, output: str = "", **kwargs: Any):
@@ -62,8 +101,8 @@ class Tool(abc.ABC):
     description: str = "base_description"
     tool_kind: ToolKind.READ
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, config: Config) -> None:
+        self.config = config
 
     # each toolkind will extend this function or schema
     @property

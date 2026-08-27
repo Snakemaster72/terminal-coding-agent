@@ -12,9 +12,22 @@ class ModelConfig(BaseModel):
     context_window: int = 256_000  # how many tokens the model can see at once
 
 
+class ShellEnvironmentPolicy(BaseModel):
+    ignore_default_excludes: bool = False
+    exclude_patterns: list[str] = Field(
+        default_factory=lambda: ["*KEY*", "*PASSWORD*", "*SECRET*", "*TOKEN*"]
+    )
+    set_vars: dict[str, str] = Field(
+        default_factory=dict
+    )  # NODE_ENV = "production", etc. overrides environment variables for the shell tool, but does not affect the agent's environment
+
+
 class Config(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     cwd: Path = Field(default_factory=Path.cwd)
+    shell_environment: ShellEnvironmentPolicy = Field(
+        default_factory=ShellEnvironmentPolicy
+    )
 
     max_turns: int = 100  # maximum number of turns in a conversation
     # max_tool_output_tokens: int = 50_000

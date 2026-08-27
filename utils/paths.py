@@ -23,6 +23,15 @@ def resolve_path_rel_to_cwd(path: str, cwd: Path) -> str:
     return str(p)
 
 
+def ensure_parent_dir(path: str | Path) -> Path:
+    path = Path(path)
+    parent_dir = path.parent
+    if not parent_dir.exists():
+        parent_dir.mkdir(parents=True, exist_ok=True)
+
+    return path
+
+
 def is_binary_file(path: str | Path) -> bool:
     try:
         with open(path, "rb") as f:

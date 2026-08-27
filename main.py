@@ -56,7 +56,7 @@ class CLI:
 
     def _get_tool_kind(self, tool_name: str) -> str | None:
         tool_kind = None
-        tool = self.agent.tool_registry.get(tool_name)
+        tool = self.agent.session.tool_registry.get(tool_name)
         if not tool:
             tool_kind = None
         else:
@@ -114,6 +114,8 @@ class CLI:
                     metadata=event.data.get("metadata", {}),
                     error=event.data.get("error"),
                     output=event.data.get("output", ""),
+                    diff=event.data.get("diff", None),
+                    exit_code=event.data.get("exit_code", None),
                 )
 
         return final_response

@@ -62,6 +62,7 @@ class TUI:
         self._tool_args_by_call_id: dict[str, dict[str, Any]] = {}
         self.config = config
         self.cwd = self.config.cwd
+        self._max_block_tokens = 240
 
     def begin_assistant(self) -> None:
         self.console.print()
@@ -80,6 +81,10 @@ class TUI:
     def _ordered_args(self, tool_name: str, arguments: dict[str, Any]) -> list[tuple]:
         _PREFERRED_ORDER = {
             "read_file": ["path", "offset", "limit"],
+            "write_file": ["path", "create_directories", "content"],
+            "edit_file": ["path", "replace_all", "old_string", "new_string"],
+            "shell": ["command", "timeout", "cwd"],
+            "list_dir": ["path", "include_hidden"],
         }
 
         preferred = _PREFERRED_ORDER.get(tool_name, [])
@@ -101,6 +106,14 @@ class TUI:
         table.add_column(justify="right", style="muted", no_wrap=True)
         table.add_column(style="code", overflow="fold")
         for key, value in self._ordered_args(tool_name, arguments):
+            if key in {"content", "old_string", "new_string"} and isinstance(
+                value, str
+            ):
+                line_count = len(value.splitlines())
+                byte_count = len(value.encode("utf-8", errors="replace"))
+                value = f"<{line_count} lines, {byte_count} bytes>"
+            if isinstance(value, bool):
+                value = str(value).lower()
             table.add_row(key, value)
 
         return table
@@ -224,6 +237,8 @@ class TUI:
         error: str | None = None,
         metadata: dict[str, Any] | None = None,
         truncated: bool = False,
+        diff: str | None = None,
+        exit_code: int | None = None,
     ) -> None:
         border_style = f"tool.{tool_kind}" if tool_kind else "tool"
         status_icon = "✅" if success else "❌"
@@ -235,16 +250,23 @@ class TUI:
             ("  ", "muted"),
             (f"#{call_id[:8]}", "muted"),
         )
-
+        args = self._tool_args_by_call_id.pop(call_id, {})
         primary_path = None
         blocks = []
 
         if isinstance(metadata, dict) and isinstance(metadata.get("path"), str):
             primary_path = metadata.get("path")
 
-        if name == "read_file" and success:
-            if primary_path:
-                start_line, code = self._extract_read_file_code(output)
+        if not success:
+            error_text = (error or "").strip() or "Tool failed without an error message"
+            blocks.append(Text(error_text, style="error"))
+            if output and output.strip():
+                blocks.append(Text())
+                blocks.append(Text(output.strip(), style="muted"))
+        elif name == "read_file":
+            extracted = self._extract_read_file_code(output) if primary_path else None
+            if extracted:
+                start_line, code = extracted
                 shown_start = None
                 shown_end = None
                 total_lines = None
@@ -283,8 +305,8 @@ class TUI:
             else:
                 output_display = truncate_text(
                     output,
-                    "",
-                    240,
+                    self.config.model_name,
+                    self._max_block_tokens,
                 )
                 blocks.append(
                     Syntax(
@@ -294,7 +316,71 @@ class TUI:
                         word_wrap=False,
                     )
                 )
+        elif name in {"write_file", "edit_file"} and diff:
+            output_line = (output or "").strip() or "Completed"
+            blocks.append(Text(output_line, style="success"))
+            diff_display = truncate_text(
+                diff, self.config.model_name, self._max_block_tokens
+            )
+            blocks.append(
+                Syntax(
+                    diff_display,
+                    "diff",
+                    theme="monokai",
+                    word_wrap=True,
+                )
+            )
+        elif name == "shell":
+            command = args.get("command", "")
+            if isinstance(command, str):
+                blocks.append(Text(f"$ {command.strip()}", style="muted"))
+            if exit_code is not None:
+                blocks.append(Text(f"Exit code: {exit_code}", style="muted"))
+            output_display = truncate_text(
+                output, self.config.model_name, self._max_block_tokens
+            )
+            blocks.append(
+                Syntax(
+                    output_display,
+                    "text",
+                    theme="monokai",
+                    word_wrap=False,
+                )
+            )
+        elif name == "list_dir":
+            entries = metadata.get("entries") if metadata else None
+            path = metadata.get("path") if metadata else None
+            summary = []
 
+            if isinstance(path, str):
+                summary.append(path)
+
+            if isinstance(entries, int):
+                summary.append(f"{entries} entries")
+
+            if summary:
+                blocks.append(Text(" • ".join(summary), style="muted"))
+            output_display = truncate_text(
+                output, self.config.model_name, self._max_block_tokens
+            )
+            blocks.append(
+                Syntax(
+                    output_display,
+                    "text",
+                    theme="monokai",
+                    word_wrap=False,
+                )
+            )
+
+        elif output and output.strip():
+            blocks.append(
+                Text(
+                    truncate_text(
+                        output.strip(), self.config.model_name, self._max_block_tokens
+                    ),
+                    style="code",
+                )
+            )
         if truncated:
             blocks.append(Text("note: tool output was truncated", style="warning"))
         panel = Panel(
