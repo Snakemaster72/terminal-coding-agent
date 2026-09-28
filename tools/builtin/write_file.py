@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 
 from tools.base import FileDiff, Tool, ToolInvocation, ToolKind, ToolResult
-from utils.paths import ensure_parent_dir, resolve_path
+from utils.paths import ensure_parent_dir, resolve_path, workspace_violation
 
 
 class WriteFileParams(BaseModel):
@@ -35,6 +35,12 @@ class WriteFileTool(Tool):
         # invocation.cwd: current working directory of the agent
         # params.path: path to the file to write to
         path = resolve_path(invocation.cwd, params.path)
+
+        denied = workspace_violation(
+            path, invocation.cwd, self.config.workspace_jail
+        )
+        if denied:
+            return ToolResult.error_result(denied)
 
         is_new_file = not path.exists()
         old_content = ""

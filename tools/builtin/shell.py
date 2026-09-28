@@ -1,6 +1,8 @@
 import asyncio
 import fnmatch
 import os
+import re
+import shlex
 import signal
 import sys
 from pathlib import Path
@@ -8,33 +10,47 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from tools.base import Tool, ToolInvocation, ToolKind, ToolResult
+from utils.paths import workspace_violation
 
-BLOCKED_COMMANDS = {
-    "rm",
-    "sudo",
-    "shutdown",
-    "reboot",
-    "init",
-    "halt",
-    "poweroff",
-    "mkfs",
-    "dd",
-    "fdisk",
-    "parted",
-    "chown",
-    "chmod",
-    "chgrp",
+# Matched against the *command word* of each segment, never as a substring:
+# a substring test blocks "npm run format" because it contains "rm".
+BLOCKED_BINARIES = frozenset(
+    {
+        "rm",
+        "sudo",
+        "su",
+        "shutdown",
+        "reboot",
+        "init",
+        "halt",
+        "poweroff",
+        "mkfs",
+        "dd",
+        "fdisk",
+        "parted",
+        "chown",
+        "chmod",
+        "chgrp",
+    }
+)
+
+# Substring checks, for shapes that are dangerous regardless of the command word
+BLOCKED_PATTERNS = (
+    ":(){",  # fork bomb
     "rm -rf /",
     "rm -rf ~",
-    "rm -rf /*",
     "dd if=/dev/zero",
     "dd if=/dev/random",
-    ":(){ :|:& };:",  # Fork bomb
     "chmod 777 /",
-    "chmod -R 777",
-    "init 0",
-    "init 6",
-}
+    "chmod -r 777",
+    "> /dev/sda",
+)
+
+# wrappers that delegate to the command word after them
+_PASSTHROUGH = frozenset({"env", "nohup", "time", "command", "exec", "builtin"})
+
+# ; && || | and newlines all start a new command word
+_SEGMENT_SPLIT = re.compile(r"[;&|\n]+")
 
 
 class ShellParams(BaseModel):
@@ -64,16 +80,56 @@ class ShellTool(Tool):
     kind = ToolKind.SHELL
     schema = ShellParams
 
+    @staticmethod
+    def _command_word(segment: str) -> str | None:
+        """The binary a segment actually invokes, ignoring env assignments."""
+        segment = segment.strip()
+        if not segment:
+            return None
+
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            # unbalanced quotes - fall back to whitespace splitting
+            tokens = segment.split()
+
+        for token in tokens:
+            # leading VAR=value assignments precede the real command word
+            if "=" in token and not token.startswith(("/", "-", ".")):
+                continue
+            word = os.path.basename(token).lower()
+            if word in _PASSTHROUGH:
+                continue
+            return word
+
+        return None
+
+    def _blocked_reason(self, command: str) -> str | None:
+        lowered = command.lower()
+
+        for pattern in BLOCKED_PATTERNS:
+            if pattern in lowered:
+                return f"it matches the blocked pattern '{pattern}'"
+
+        for segment in _SEGMENT_SPLIT.split(command):
+            word = self._command_word(segment)
+            if word and word in BLOCKED_BINARIES:
+                return f"'{word}' is a blocked command"
+
+        return None
+
     async def execute(self, invocation: ToolInvocation) -> ToolResult:
         params = ShellParams(**invocation.params)
 
-        command = params.command.lower().strip()
+        if not params.command.strip():
+            return ToolResult.error_result("No command provided.")
 
-        for blocked in BLOCKED_COMMANDS:
-            if blocked in command:
-                return ToolResult.error_result(
-                    f"Command '{params.command}' is blocked for safety reasons."
-                )
+        blocked = self._blocked_reason(params.command)
+        if blocked:
+            return ToolResult.error_result(
+                f"Command '{params.command}' is blocked for safety reasons: {blocked}."
+            )
+
         if params.cwd:
             cwd = Path(params.cwd)
             if not cwd.is_absolute():
@@ -81,11 +137,14 @@ class ShellTool(Tool):
         else:
             cwd = invocation.cwd
 
+        denied = workspace_violation(
+            cwd, invocation.cwd, self.config.workspace_jail
+        )
+        if denied:
+            return ToolResult.error_result(denied)
+
         if not cwd.exists():
             return ToolResult.error_result(f"Working directory '{cwd}' does not exist.")
-
-        if not command:
-            return ToolResult.error_result("No command provided.")
 
         env = self._build_environment()
         if sys.platform == "win32":
@@ -137,7 +196,7 @@ class ShellTool(Tool):
         return ToolResult(
             success=exit_code == 0,
             output=output,
-            exit_code=stderr if exit_code else None,
+            exit_code=exit_code,
             metadata={
                 "tool_name": self.name,
                 "command": params.command,

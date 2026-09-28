@@ -3,7 +3,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from tools.base import FileDiff, Tool, ToolInvocation, ToolKind, ToolResult
-from utils.paths import ensure_parent_dir, resolve_path
+from utils.paths import ensure_parent_dir, resolve_path, workspace_violation
 
 
 class EditParams(BaseModel):
@@ -48,6 +48,12 @@ class EditTool(Tool):
         # params.is_deletion: whether the file is being deleted
 
         path = resolve_path(invocation.cwd, params.path)
+
+        denied = workspace_violation(
+            path, invocation.cwd, self.config.workspace_jail
+        )
+        if denied:
+            return ToolResult.error_result(denied)
 
         if not path.exists():
             if params.old_string:

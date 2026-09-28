@@ -10,8 +10,10 @@ logger = logging.getLogger(__name__)
 
 
 class ToolRegistry:
-    def __init__(self):
+    def __init__(self, config: Config):
         self._tools: dict[str, Tool] = {}
+        self._mcp_tools: dict[str, Tool] = {}
+        self.config = config
 
     def register(self, tool: Tool) -> None:
         if tool.name in self._tools:
@@ -19,6 +21,13 @@ class ToolRegistry:
 
         self._tools[tool.name] = tool
         logger.debug(f"Registered tool: {tool.name}")
+
+    def register_mcp_tool(self, tool: Tool) -> None:
+        if tool.name in self._tools:
+            logger.warning(f"Overwriting existing tool: {tool.name}")
+
+        self._mcp_tools[tool.name] = tool
+        logger.debug(f"Registered MCP tool: {tool.name}")
 
     def unregister(self, name: str) -> bool:
         if name in self._tools:
@@ -31,13 +40,23 @@ class ToolRegistry:
         if name in self._tools:
             return self._tools[name]
 
+        elif name in self._mcp_tools:
+            return self._mcp_tools[name]
+
         return None
 
-    def get_tools(self):
+    def get_tools(self) -> list[Tool]:
         tools: list[Tool] = []
 
         for tool in self._tools.values():
             tools.append(tool)
+
+        for mcp_tool in self._mcp_tools.values():
+            tools.append(mcp_tool)
+
+        if self.config.allowed_tools:
+            allowed_set = set(self.config.allowed_tools)
+            tools = [tool for tool in tools if tool.name in allowed_set]
 
         return tools
 
@@ -47,6 +66,14 @@ class ToolRegistry:
     async def invoke(self, name: str, params: dict[str, Any], cwd: Path) -> ToolResult:
         tool = self.get(name)
         if tool is None:
+            return ToolResult.error_result(
+                f"Unknown tool: {name}", metadata={"tool_name": name}
+            )
+
+        # a tool filtered out of get_tools() is not in the schemas the model
+        # saw, so calling it means the model guessed - refuse it here too,
+        # otherwise allowed_tools only hides tools rather than disabling them
+        if self.config.allowed_tools and name not in set(self.config.allowed_tools):
             return ToolResult.error_result(
                 f"Unknown tool: {name}", metadata={"tool_name": name}
             )
@@ -73,16 +100,13 @@ class ToolRegistry:
             logger.exception(f"Tool {name} raised unexpected error")
             result = ToolResult.error_result(
                 f"Internal error: {e!s}",
-                metadata={
-                    "tool_name",
-                    name,
-                },
+                metadata={"tool_name": name, "exception": type(e).__name__},
             )
         return result
 
 
 def create_default_registry(config: Config) -> ToolRegistry:
-    registry = ToolRegistry()
+    registry = ToolRegistry(config)
 
     for tool_class in get_all_builtin_tools():
         registry.register(tool_class(config))

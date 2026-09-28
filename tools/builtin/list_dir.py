@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 
 from tools.base import Tool, ToolInvocation, ToolKind, ToolResult
-from utils.paths import resolve_path
+from utils.paths import resolve_path, workspace_violation
 
 # why not just shell
 
@@ -27,28 +27,31 @@ class ListDirTool(Tool):
 
         dir_path = resolve_path(invocation.cwd, params.path)
 
+        denied = workspace_violation(
+            dir_path, invocation.cwd, self.config.workspace_jail
+        )
+        if denied:
+            return ToolResult.error_result(denied)
+
         if not dir_path.exists() or not dir_path.is_dir():
-            return ToolResult(
-                success=False,
-                message=f"Directory '{dir_path}' does not exist or is not a directory.",
+            return ToolResult.error_result(
+                f"Directory '{dir_path}' does not exist or is not a directory."
             )
 
         try:
-            sorted(dir_path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+            items = sorted(
+                dir_path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())
+            )
         except Exception as e:
             return ToolResult.error_result(
-                message=f"Error listing directory '{dir_path}': {e!s}"
+                f"Error listing directory '{dir_path}': {e!s}"
             )
 
         if not params.include_hidden:
-            items = [
-                item for item in dir_path.iterdir() if not item.name.startswith(".")
-            ]
+            items = [item for item in items if not item.name.startswith(".")]
 
         if not items:
-            return ToolResult.success_result(
-                message=f"Directory '{dir_path}' is empty."
-            )
+            return ToolResult.success_result(f"Directory '{dir_path}' is empty.")
 
         lines = []
 

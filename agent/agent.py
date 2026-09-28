@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncGenerator
 
 # from requests import Session
@@ -37,9 +38,18 @@ class Agent:
         for turn in range(max_turns):
             self.session.increment_turn()
             response_text = ""
+
+            # keep the next request inside the model's context window. Safe to
+            # do here and only here: every assistant tool_calls message from the
+            # previous turn already has its matching tool results appended, so
+            # the history is balanced and nothing can be left orphaned
+            async for context_event in self._manage_context():
+                yield context_event
+
             tool_schemas = self.session.tool_registry.get_schemas()
 
             tool_calls: list[ToolCall] = []
+            stream_failed = False
 
             async for event in self.session.client.chat_completion(
                 self.session.context_manager.get_messages(),
@@ -57,6 +67,13 @@ class Agent:
                         tool_calls.append(event.tool_call)
                 elif event.type == StreamEventType.ERROR:
                     yield AgentEvent.agent_error(event.error or "unknown error")
+                    stream_failed = True
+
+            # a failed request produced no assistant turn - don't append an empty
+            # message (it corrupts the context for every later turn) and don't
+            # loop again, or we burn through max_turns replaying the same failure
+            if stream_failed and not response_text and not tool_calls:
+                return
 
             self.session.context_manager.add_assistant_message(
                 response_text or None,
@@ -64,7 +81,12 @@ class Agent:
                     {
                         "id": tc.call_id,
                         "type": "function",
-                        "function": {"name": tc.name, "arguments": tc.arguments},
+                        # the API expects `arguments` as a JSON *string*, but
+                        # parse_tool_call_arguments() already decoded it to a dict
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments),
+                        },
                     }
                     for tc in tool_calls
                 ]
@@ -108,10 +130,57 @@ class Agent:
                     tool_result.tool_call_id, tool_result.content, tool_result.is_error
                 )
 
+        # falling out of the loop means the turn budget was spent mid-task.
+        # Say so - silently returning stale text reads like a finished answer
+        yield AgentEvent.max_turns_reached(max_turns)
+
+    async def _manage_context(self) -> AsyncGenerator[AgentEvent, None]:
+        """Two-stage context control, cheapest lever first.
+
+        Stage 1 drops the bodies of stale tool outputs, which costs nothing.
+        Stage 2 summarizes the whole history into a continuation prompt, which
+        costs an extra model call, so it only runs if stage 1 left us still
+        over budget.
+        """
+        context_manager = self.session.context_manager
+
+        if context_manager.usage_ratio() >= self.config.prune_threshold:
+            reclaimed = context_manager.prune_stale_tool_outputs()
+            if reclaimed > 0:
+                yield AgentEvent.context_pruned(
+                    reclaimed, context_manager.total_tokens()
+                )
+
+        if not context_manager.should_compact():
+            return
+
+        # The system prompt is never summarized, so it is a hard floor. If the
+        # history is already just one summary message and we are still over
+        # budget, compacting again cannot help - it would only fail on every
+        # remaining turn and spam the user with errors
+        if context_manager.message_count() < 2:
+            return
+
+        before = context_manager.total_tokens()
+        summary, _usage = await self.session.compactor.compress(context_manager)
+
+        if not summary:
+            # better to run at full context and let the provider complain than
+            # to throw away history we could not replace
+            yield AgentEvent.agent_error(
+                "Context compaction failed; continuing with the full history."
+            )
+            return
+
+        context_manager.replace_with_summary(summary)
+        yield AgentEvent.context_compacted(before, context_manager.total_tokens())
+
     async def __aenter__(self) -> Agent:
+        await self.session.initialize()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        if self.session and self.session.client:
+        if self.session:
             await self.session.client.close()
+            await self.session.mcp_manager.shutdown()
             self.session = None

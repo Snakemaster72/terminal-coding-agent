@@ -37,6 +37,7 @@ AGENT_THEME = Theme(
         "tool.network": "bright_blue",
         "tool.memory": "green",
         "tool.mcp": "bright_cyan",
+        "tool.agent": "bright_yellow",
         # Code / blocks
         "code": "white",
     }
@@ -85,6 +86,9 @@ class TUI:
             "edit_file": ["path", "replace_all", "old_string", "new_string"],
             "shell": ["command", "timeout", "cwd"],
             "list_dir": ["path", "include_hidden"],
+            "grep": ["path", "case_sensitive", "pattern"],
+            "glob": ["path", "pattern"],
+            "web_search": ["query", "max_results"],
         }
 
         preferred = _PREFERRED_ORDER.get(tool_name, [])
@@ -114,6 +118,8 @@ class TUI:
                 value = f"<{line_count} lines, {byte_count} bytes>"
             if isinstance(value, bool):
                 value = str(value).lower()
+            if isinstance(value, (int, float)):
+                value = str(value)
             table.add_row(key, value)
 
         return table
@@ -263,7 +269,7 @@ class TUI:
             if output and output.strip():
                 blocks.append(Text())
                 blocks.append(Text(output.strip(), style="muted"))
-        elif name == "read_file":
+        elif name == "read_file" and success:
             extracted = self._extract_read_file_code(output) if primary_path else None
             if extracted:
                 start_line, code = extracted
@@ -316,7 +322,7 @@ class TUI:
                         word_wrap=False,
                     )
                 )
-        elif name in {"write_file", "edit_file"} and diff:
+        elif name in {"write_file", "edit_file"} and diff and success:
             output_line = (output or "").strip() or "Completed"
             blocks.append(Text(output_line, style="success"))
             diff_display = truncate_text(
@@ -330,7 +336,7 @@ class TUI:
                     word_wrap=True,
                 )
             )
-        elif name == "shell":
+        elif name == "shell" and success:
             command = args.get("command", "")
             if isinstance(command, str):
                 blocks.append(Text(f"$ {command.strip()}", style="muted"))
@@ -347,7 +353,7 @@ class TUI:
                     word_wrap=False,
                 )
             )
-        elif name == "list_dir":
+        elif name == "list_dir" and success:
             entries = metadata.get("entries") if metadata else None
             path = metadata.get("path") if metadata else None
             summary = []
@@ -371,7 +377,111 @@ class TUI:
                     word_wrap=False,
                 )
             )
+        elif name == "grep" and success:
+            matches = metadata.get("matches") if metadata else None
+            files_searched = metadata.get("files_searched") if metadata else None
+            summary = []
+            if isinstance(matches, int):
+                summary.append(f"{matches} matches")
+            if isinstance(files_searched, int):
+                summary.append(f"{files_searched} files searched")
+            if summary:
+                blocks.append(Text(" • ".join(summary), style="muted"))
 
+            output_display = truncate_text(
+                output, self.config.model_name, self._max_block_tokens
+            )
+
+            blocks.append(
+                Syntax(
+                    output_display,
+                    "text",
+                    theme="monokai",
+                    word_wrap=False,
+                )
+            )
+
+        elif name == "glob" and success:
+            matches = metadata.get("matches") if metadata else None
+            if isinstance(matches, int):
+                blocks.append(f"{matches} matches")
+
+            output_display = truncate_text(
+                output, self.config.model_name, self._max_block_tokens
+            )
+
+            blocks.append(
+                Syntax(
+                    output_display,
+                    "text",
+                    theme="monokai",
+                    word_wrap=False,
+                )
+            )
+
+        elif name == "web_search" and success:
+            query = metadata.get("query") if metadata else None
+            results = metadata.get("results") if metadata else None
+            summary = []
+            if isinstance(query, str):
+                summary.append(f"Query: {query}")
+            if isinstance(results, int):
+                summary.append(f"{results} results")
+            if summary:
+                blocks.append(Text(" • ".join(summary), style="muted"))
+
+            output_display = truncate_text(
+                output, self.config.model_name, self._max_block_tokens
+            )
+
+            blocks.append(
+                Syntax(
+                    output_display,
+                    "text",
+                    theme="monokai",
+                    word_wrap=False,
+                )
+            )
+
+        elif name == "web_fetch" and success:
+            status_code = metadata.get("status_code") if metadata else None
+            content_length = metadata.get("content_length") if metadata else None
+            url = args.get("url") if args else None
+            summary = []
+            if isinstance(status_code, int):
+                summary.append(f"Status Code: {status_code}")
+            if isinstance(content_length, int):
+                summary.append(f"Content Length: {content_length}")
+            if isinstance(url, str):
+                summary.append(f"URL: {url}")
+            if summary:
+                blocks.append(Text(" • ".join(summary), style="muted"))
+
+            output_display = truncate_text(
+                output, self.config.model_name, self._max_block_tokens
+            )
+
+            blocks.append(
+                Syntax(
+                    output_display,
+                    "text",
+                    theme="monokai",
+                    word_wrap=False,
+                )
+            )
+
+        elif name == "todos" and success:
+            output_display = truncate_text(
+                output, self.config.model_name, self._max_block_tokens
+            )
+            blocks.append(
+                Syntax(
+                    output_display,
+                    "text",
+                    theme="monokai",
+                    word_wrap=False,
+                )
+            )
         elif output and output.strip():
             blocks.append(
                 Text(
@@ -381,6 +491,23 @@ class TUI:
                     style="code",
                 )
             )
+
+        if error and not success:
+            output_display = truncate_text(
+                output, self.config.model_name, self._max_block_tokens
+            )
+            if output_display.strip():
+                blocks.append(
+                    Syntax(
+                        output_display,
+                        "text",
+                        theme="monokai",
+                        word_wrap=False,
+                    )
+                )
+            else:
+                blocks.append(Text("(no output)", style="muted"))
+
         if truncated:
             blocks.append(Text("note: tool output was truncated", style="warning"))
         panel = Panel(

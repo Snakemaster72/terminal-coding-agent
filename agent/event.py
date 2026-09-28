@@ -24,6 +24,11 @@ class AgentEventType(str, Enum):
     TOOL_CALL_START = "tool_call_start"
     TOOL_CALL_COMPLETE = "tool_call_complete"
 
+    # context management
+    CONTEXT_PRUNED = "context_pruned"
+    CONTEXT_COMPACTED = "context_compacted"
+    MAX_TURNS_REACHED = "max_turns_reached"
+
 
 @dataclass
 class AgentEvent:
@@ -51,6 +56,27 @@ class AgentEvent:
         return cls(
             type=AgentEventType.AGENT_ERROR,
             data={"error": error, "details": details or {}},
+        )
+
+    @classmethod
+    def context_pruned(cls, reclaimed: int, total: int) -> AgentEvent:
+        return cls(
+            type=AgentEventType.CONTEXT_PRUNED,
+            data={"reclaimed_tokens": reclaimed, "total_tokens": total},
+        )
+
+    @classmethod
+    def context_compacted(cls, before: int, after: int) -> AgentEvent:
+        return cls(
+            type=AgentEventType.CONTEXT_COMPACTED,
+            data={"before_tokens": before, "after_tokens": after},
+        )
+
+    @classmethod
+    def max_turns_reached(cls, max_turns: int) -> AgentEvent:
+        return cls(
+            type=AgentEventType.MAX_TURNS_REACHED,
+            data={"max_turns": max_turns},
         )
 
     @classmethod

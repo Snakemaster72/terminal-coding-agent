@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 
 from tools.base import Tool, ToolInvocation, ToolKind, ToolResult
-from utils.paths import is_binary_file, resolve_path
+from utils.paths import is_binary_file, resolve_path, workspace_violation
 from utils.text import count_tokens, truncate_text
 
 
@@ -40,11 +40,17 @@ class ReadFileTool(Tool):
         params = ReadFileParams(**invocation.params)
         path = resolve_path(invocation.cwd, params.path)
 
+        denied = workspace_violation(
+            path, invocation.cwd, self.config.workspace_jail
+        )
+        if denied:
+            return ToolResult.error_result(denied)
+
         if not path.exists():
-            return ToolResult.error_result("File not found: {path}")
+            return ToolResult.error_result(f"File not found: {path}")
 
         if not path.is_file():
-            return ToolResult.error_result("Path is not a file: {path}")
+            return ToolResult.error_result(f"Path is not a file: {path}")
 
         file_size = path.stat().st_size
 
@@ -93,12 +99,14 @@ class ReadFileTool(Tool):
                 formatted_lines.append(f"{i:6}|{line}")
 
             output = "\n".join(formatted_lines)
-            token_count = count_tokens(output)
+            model = self.config.model_name
+            token_count = count_tokens(output, model)
 
             truncated = False
             if token_count > self.MAX_OUTPUT_TOKENS:
                 output = truncate_text(
                     output,
+                    model,
                     self.MAX_OUTPUT_TOKENS,
                     suffix=f"\n... [truncated {total_lines} total lines]",
                 )

@@ -1,2 +1,7 @@
 CLAUDE.MD
 .venv
+__pycache__/
+*.pyc
+.env
+.env.*
+.ai-agent/

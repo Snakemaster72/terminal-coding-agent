@@ -6,7 +6,7 @@ import tomli
 
 logger = logging.getLogger(__name__)
 
-from platformdirs import user_config_dir
+from platformdirs import user_config_dir, user_data_dir
 
 from config.config import Config
 from utils.errors import ConfigError
@@ -21,6 +21,13 @@ def get_config_dir() -> Path:
     Get the configuration directory for the application.
     """
     return Path(user_config_dir("ai-agent"))
+
+
+def get_data_dir() -> Path:
+    """
+    Get the data directory for the application.
+    """
+    return Path(user_data_dir("ai-agent"))
 
 
 def get_system_config_path() -> Path:

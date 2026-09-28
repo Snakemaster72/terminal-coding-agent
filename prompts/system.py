@@ -8,7 +8,11 @@ if TYPE_CHECKING:
     from tools.base import Tool
 
 
-def get_system_prompt(config: Config, tools: list[Tool] | None = None) -> str:
+def get_system_prompt(
+    config: Config,
+    user_memory: str | None = None,
+    tools: list[Tool] | None = None,
+) -> str:
     parts = []
 
     tools = tools or []
@@ -32,6 +36,9 @@ def get_system_prompt(config: Config, tools: list[Tool] | None = None) -> str:
 
     if config.user_instructions:
         parts.append(_get_user_instructions_section(config.user_instructions))
+
+    if user_memory:
+        parts.append(_get_memory_section(user_memory))
 
     # Operational guidelines
     # kind of a summary, should be last section, so that the agent can read it and follow it
@@ -299,9 +306,49 @@ The following instructions were provided by the project maintainers:
 Follow these instructions carefully as they contain important context about this specific project."""
 
 
+def _get_memory_section(memory: str) -> str:
+    """Generate user memory section."""
+    return f"""# Remembered Context
+
+The following information has been stored from previous interactions:
+
+{memory}
+
+Use this information to personalize your responses and maintain consistency."""
+
+
 def _get_user_instructions_section(instructions: str) -> str:
     return f"""# User Instructions
 
 The user has provided the following custom instructions:
 
 {instructions}"""
+
+
+def get_compression_prompt() -> str:
+    return """Provide a detailed continuation prompt for resuming this work. The new session will NOT have access to our conversation history.
+
+IMPORTANT: Structure your response EXACTLY as follows:
+
+## ORIGINAL GOAL
+[State the user's original request/goal in one paragraph]
+
+## COMPLETED ACTIONS (DO NOT REPEAT THESE)
+[List specific actions that are DONE and should NOT be repeated. Be specific with file paths, function names, changes made. Use bullet points.]
+
+## CURRENT STATE
+[Describe the current state of the codebase/project after the completed actions. What files exist, what has been modified, what is the current status.]
+
+## IN-PROGRESS WORK
+[What was being worked on when the context limit was hit? Any partial changes?]
+
+## REMAINING TASKS
+[What still needs to be done to complete the original goal? Be specific.]
+
+## NEXT STEP
+[What is the immediate next action to take? Be very specific - this is what the agent should do first.]
+
+## KEY CONTEXT
+[Any important decisions, constraints, user preferences, technical context or assumptions that must persist.]
+
+Be extremely specific with file paths and function names. The goal is to allow seamless continuation without redoing any completed work."""

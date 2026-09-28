@@ -16,6 +16,17 @@ from client.response import (
 from config.config import Config
 
 
+def _build_usage(raw: Any) -> TokenUsage:
+    """Providers vary in which usage fields they populate; none are required."""
+    details = getattr(raw, "prompt_tokens_details", None)
+    return TokenUsage(
+        prompt_tokens=getattr(raw, "prompt_tokens", 0) or 0,
+        completion_tokens=getattr(raw, "completion_tokens", 0) or 0,
+        total_tokens=getattr(raw, "total_tokens", 0) or 0,
+        cached_tokens=getattr(details, "cached_tokens", 0) or 0,
+    )
+
+
 class LLMClient:
     def __init__(self, config: Config) -> None:
         # _client is a private member
@@ -29,9 +40,7 @@ class LLMClient:
             # cursor has an auto model feature
             self._client = AsyncOpenAI(
                 api_key=self.config.api_key,
-                # ***REMOVED***
-                base_url=self.config.base_url,
-                # "https://openrouter.ai/api/v1",
+                base_url=self.config.base_url,  # e.g. https://openrouter.ai/api/v1
             )
         return self._client
 
@@ -71,51 +80,58 @@ class LLMClient:
             "model": self.config.model_name,
             "messages": messages,
             "stream": stream,
+            "temperature": self.config.temperature,
         }
+
+        if self.config.max_tokens is not None:
+            kwargs["max_tokens"] = self.config.max_tokens
 
         if tools:
             kwargs["tools"] = self._build_tools(tools)
             kwargs["tool_choice"] = "auto"
 
         for attempt in range(self._max_retries + 1):
+            # a retry replays the request from the start, so it is only safe
+            # while nothing has reached the caller yet - otherwise the caller
+            # would see the first partial response followed by a full one
+            emitted = False
             try:
                 if stream:
                     async for event in self._stream_response(client, kwargs):
+                        emitted = True
                         yield event
                 else:
                     event = await self._non_stream_response(client, kwargs)
+                    emitted = True
                     yield event
                 return
 
-            except RateLimitError as e:
-                if attempt < self._max_retries:
-                    # attempt -> failed
-                    # 1, 2 ,3
-                    wait_time = 2**attempt
-                    await asyncio.sleep(wait_time)
-                else:
-                    yield StreamEvent(
-                        type=StreamEventType.ERROR,
-                        error=f"Rate limit exceeded: {e}",
-                    )
-                    return
+            except (RateLimitError, APIConnectionError) as e:
+                label = (
+                    "Rate limit exceeded"
+                    if isinstance(e, RateLimitError)
+                    else "Connection error"
+                )
+                if attempt < self._max_retries and not emitted:
+                    # 1s, 2s, 4s
+                    await asyncio.sleep(2**attempt)
+                    continue
 
-            except APIConnectionError as e:
-                if attempt < self._max_retries:
-                    # attempt -> failed
-                    # 1, 2 ,3
-                    wait_time = 2**attempt
-                    await asyncio.sleep(wait_time)
-                else:
-                    yield StreamEvent(
-                        type=StreamEventType.ERROR,
-                        error=f"Connection error: {e}",
-                    )
-                    return
-            except APIError as e:
+                if emitted:
+                    label = f"{label} after a partial response"
+
                 yield StreamEvent(
                     type=StreamEventType.ERROR,
-                    error=f"Connection error: {e}",
+                    error=f"{label}: {e}",
+                )
+                return
+
+            except APIError as e:
+                # not retried: 4xx-class failures (bad request, context length
+                # exceeded, auth) will fail identically on every attempt
+                yield StreamEvent(
+                    type=StreamEventType.ERROR,
+                    error=f"API error: {e}",
                 )
                 return
 
@@ -129,12 +145,7 @@ class LLMClient:
         tool_calls: dict[int, dict[str, Any]] = {}
         async for chunk in response:
             if hasattr(chunk, "usage") and chunk.usage:
-                usage = TokenUsage(
-                    prompt_tokens=chunk.usage.prompt_tokens,
-                    completion_tokens=chunk.usage.completion_tokens,
-                    total_tokens=chunk.usage.total_tokens,
-                    cached_tokens=chunk.usage.prompt_tokens_details.cached_tokens,
-                )
+                usage = _build_usage(chunk.usage)
 
             if not chunk.choices:
                 continue
@@ -228,14 +239,7 @@ class LLMClient:
                         ),
                     )
                 )
-        usage = None
-        if response.usage:
-            usage = TokenUsage(
-                prompt_tokens=response.usage.prompt_tokens,
-                completion_tokens=response.usage.completion_tokens,
-                total_tokens=response.usage.total_tokens,
-                cached_tokens=response.usage.prompt_tokens_details.cached_tokens,
-            )
+        usage = _build_usage(response.usage) if response.usage else None
         return StreamEvent(
             type=StreamEventType.MESSAGE_COMPLETE,
             text_delta=text_delta,

@@ -19,6 +19,7 @@ class ToolKind(str, Enum):
     NETWORK = "network"
     MEMORY = "memory"
     MCP = "mcp"
+    AGENT = "agent"
 
 
 @dataclass
